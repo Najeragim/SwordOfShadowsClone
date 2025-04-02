@@ -57,6 +57,7 @@ jobs:
 
       - name: Build Docker image
         run: docker build -t ${{ secrets.DOCKER_USERNAME }}/swordofshadows:latest .
+  
   performance-test:
     name: Performance Testing with Artillery
     runs-on: ubuntu-latest
@@ -71,7 +72,7 @@ jobs:
       - name: Start container in background
         run: |
           docker run -d --name perf-test -p 8080:80 ${{ secrets.DOCKER_USERNAME }}/swordofshadows:latest
-          sleep 10
+          sleep 15 # Espera generosa para que Unity WebGL se inicialice
           
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -81,10 +82,44 @@ jobs:
       - name: Install Artillery
         run: npm install -g artillery
           
+      - name: Create basic test script
+        run: |
+          cat > basic-test.yml <<EOL
+          config:
+            target: "http://localhost:8080"
+            phases:
+              - duration: 30
+                arrivalRate: 5
+                name: "Ramp up"
+              - duration: 60
+                arrivalRate: 10
+                rampTo: 20
+                name: "Sustained load"
+            defaults:
+              headers:
+                x-my-service-auth: "12345"
+                x-my-service-custom-id: "custom-$${uuid}"
+          
+          scenarios:
+            - name: "Load test main page"
+              flow:
+                - get:
+                    url: "/"
+          EOL
+          
       - name: Run performance test
         run: |
-          artillery run --config artillery.config.yml
-          artillery quick --count 10 -n 5 http://localhost:8080 || echo "Smoke test completed"
+          artillery run basic-test.yml --output artillery-report.json
+          artillery report artillery-report.json
+          
+      - name: Upload performance report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-report
+          path: |
+            artillery-report.json
+            artillery-report.html
           
       - name: Cleanup
         run: |
