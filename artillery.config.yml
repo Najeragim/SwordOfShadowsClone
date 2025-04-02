@@ -1,0 +1,15 @@
+config:
+  target: "http://localhost:8080"
+  phases:
+    - duration: 60
+      arrivalRate: 5
+      name: "Warm up phase"
+    - duration: 120
+      arrivalRate: 10
+      rampTo: 20
+      name: "Ramp up load"
+  scenarios:
+    - name: "Load test main page"
+      flow:
+        - get:
+            url: "/"
