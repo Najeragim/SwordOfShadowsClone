@@ -14,6 +14,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Clean up disk space
+        run: |
+          # Limpiar paquetes apt
+          sudo apt-get clean
+          # Remover docker images no usadas
+          docker rmi $(docker images -q) || true
+          # Limpiar cache de npm
+          npm cache clean --force || true
+          # Limpiar otros caches
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache
+          
       - name: Cache Library
         uses: actions/cache@v4
         with:
@@ -39,7 +50,7 @@ jobs:
           name: WebGL-Build
           path: build/WebGL
   dockerize:
-    name: Create and Push Docker Image
+    name: Create Docker Image
     runs-on: ubuntu-latest
     needs: build
     steps:
@@ -55,13 +66,108 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/swordofshadows:latest .
+          docker save ${{ secrets.DOCKER_USERNAME }}/swordofshadows:latest -o swordofshadows.tar
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: swordofshadows.tar
+          retention-days: 1
+  
+  performance-test:
+    name: Performance Testing with Artillery
+    runs-on: ubuntu-latest
+    needs: dockerize
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Start container in background
+        run: |
+          docker run -d --name perf-test -p 8080:80 ${{ secrets.DOCKER_USERNAME }}/swordofshadows:latest
+          sleep 15 # Espera generosa para que Unity WebGL se inicialice
+          
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install Artillery
+        run: npm install -g artillery
+          
+      - name: Create basic test script
+        run: |
+          cat > basic-test.yml <<EOL
+          config:
+            target: "http://localhost:8080"
+            phases:
+              - duration: 30
+                arrivalRate: 5
+                name: "Ramp up"
+              - duration: 60
+                arrivalRate: 10
+                rampTo: 20
+                name: "Sustained load"
+            defaults:
+              headers:
+                x-my-service-auth: "12345"
+                x-my-service-custom-id: "custom-$${uuid}"
+          
+          scenarios:
+            - name: "Load test main page"
+              flow:
+                - get:
+                    url: "/"
+          EOL
+          
+      - name: Run performance test
+        run: |
+          artillery run basic-test.yml --output artillery-report.json
+          artillery report artillery-report.json
+          
+      - name: Upload performance report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-report
+          path: |
+            artillery-report.json
+            artillery-report.html
+          
+      - name: Cleanup
+        run: |
+          docker stop perf-test
+          docker rm perf-test
+
+  push:
+    name: Push Docker Image
+    runs-on: ubuntu-latest
+    needs: performance-test
+    steps:
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: .
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/swordofshadows:latest .
-          docker push ${{ secrets.DOCKER_USERNAME }}/swordofshadows:latest
+      - name: Load Docker image
+        run: docker load -i swordofshadows.tar
+
+      - name: Push Docker image
+        run: docker push ${{ secrets.DOCKER_USERNAME }}/swordofshadows:latest
